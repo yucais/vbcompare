@@ -7,6 +7,7 @@ from typing import Dict, NamedTuple, Tuple, Union
 from collections import namedtuple, defaultdict
 import multiprocessing as mp
 import sh
+import time
 
 import jax.numpy as jnp
 import numpy as np
@@ -252,7 +253,6 @@ class SeqData:
 
             else:
                 names = np.random.choice(self.sids, size=n_tips, replace=False).tolist()
-            
             aln_sample = MultipleSeqAlignment([self.seqs[s] for s in names])
 
             AlignIO.write(
@@ -359,6 +359,19 @@ class SeqData:
         self.process_tips()
         self.pad_tips()
 
+    def prep_data_with_existing_tree(
+        self,
+        tree_path
+    ):
+        # mimic sampling process
+        aln_sample = MultipleSeqAlignment([self.seqs[s] for s in self.sids])
+        self.alns = [aln_sample]
+        self.tree_path = tree_path
+
+        self.process_trees()
+        self.process_tips()
+        self.pad_tips()
+
     def setup_flows(self, global_flows=None, local_flows=None):
         if global_flows is not None:
             self.global_flows = global_flows
@@ -384,7 +397,7 @@ class SeqData:
                 for td in self.tds
             ]
 
-    def loop(self, _params_prior_loglik, rng, n_iter=10, step_size=1.0, Q=HKY(2.7), threshold=0.01, dbg=False):
+    def loop(self, _params_prior_loglik, rng, n_tips, n_epochs, n_iter=10, step_size=1.0, Q=HKY(2.7), threshold=0.01, dbg=False):
         opt_init, opt_update, get_params = optimizers.adagrad(step_size=step_size)
 
         @partial(jit, static_argnums=(5, 6))
@@ -397,7 +410,7 @@ class SeqData:
             c,
             dbg,
             td,
-            tip_data_c,
+            tip_data_c
         ):
             p = get_params(opt_state)
             local_p = get_params(local_opt_state)
@@ -406,6 +419,18 @@ class SeqData:
             def f(j, tup):
                 f_df0, rng = tup
                 rng, subrng = jax.random.split(rng)
+                args = (
+                    p,
+                    self.flows,
+                    td,
+                    tip_data_c,
+                    subrng,
+                    Q,
+                    c,
+                    dbg,
+                    True,
+                    _params_prior_loglik,
+                )
                 f_df1 = _loss(
                     p,
                     self.flows,
@@ -418,8 +443,14 @@ class SeqData:
                     True,
                     _params_prior_loglik,
                 )
+                # start = time.time()
+                # df1 = grad(_loss)(*args)
+                # end = time.time()
+                # total_gradient_time += end-start
+                # print(f"Gradient calculation time is {end-start} for {n_tips} tips")
+                # f_df1 = (f, df1)
                 f_df1 = tree_map(jnp.nan_to_num, f_df1)
-                return tree_multimap(jnp.add, f_df0, f_df1), rng
+                return tree_map(jnp.add, f_df0, f_df1), rng
 
             init = ((0.0, tree_map(jnp.zeros_like, p)), rng)
             f_df, rng = jax.lax.fori_loop(0, M, f, init)
@@ -432,13 +463,18 @@ class SeqData:
                 g,
                 opt_update(i, global_g, opt_state),
                 opt_update(i, local_g, local_opt_state),
-                rng,
+                rng
             )
 
+        # print(self.global_flows)
+        # for k, v in self.global_flows.items():
+        #     print(k, v.params)
         params = {k: v.params for k, v in self.global_flows.items()}
         params = tree_map(lambda x: np.random.normal(size=x.shape) * 0.1, params)
+        # print(params)
 
         local_params = [{k: v.params for k, v in lf.items()} for lf in self.local_flows]
+        # print(local_params)
         local_params = [
             tree_map(lambda x: np.random.normal(size=x.shape) * 0.1, lp)
             for lp in local_params
@@ -453,44 +489,56 @@ class SeqData:
 
         br = False
         prev = np.zeros(len(self.tds))
-        with tqdm(total=n_iter * len(self.tds)) as pbar:
-            for i in range(n_iter):
-                for j, (td, tip_data_c) in enumerate(zip(self.tds, self.tip_data_cs)):
-                    self.flows = self.global_flows | self.local_flows[j]
-                    
-                    f, g, opt_state1, local_opt_state1, rng1 = step(
-                        opt_state,
-                        local_opt_state[j],
-                        rng,
-                        i,
-                        10,
-                        ((True, True), (True, True, True)),
-                        dbg,
-                        td,
-                        tip_data_c,
-                    )
-                    assert np.isfinite(f), f
-                    if i > 1:
-                        prev = np.array([fz[-2] for fz in fs])
-                        curr = np.array([fz[-1] for fz in fs])
-                        diff = np.abs(prev-curr)/prev
-                        if diff.mean() < threshold:
-                            break
-                            br = True
-
-                    fs[j].append(f)
-                    gs[j].append(jnp.linalg.norm(ravel_pytree(g)[0]))
-                    opt_state = opt_state1
-                    local_opt_state[j] = local_opt_state1
-                    rng = rng1
-
-                    pbar.update(1)
+        # print(len(self.tds))
+        # print(len(self.tip_data_cs))
+        # with tqdm(total=n_iter * len(self.tds)) as pbar:
+        total_gradient_time = 0
+        for i in tqdm(range(n_iter)):
+            for j, (td, tip_data_c) in enumerate(zip(self.tds, self.tip_data_cs)):
+                self.flows = self.global_flows | self.local_flows[j]
                 
+                start = time.time()
+                f, g, opt_state1, local_opt_state1, rng1 = step(
+                    opt_state,
+                    local_opt_state[j],
+                    rng,
+                    i,
+                    1,
+                    ((False, True), (False, True, False)),
+                    dbg,
+                    td,
+                    tip_data_c
+                )
+                grad_time = time.time() - start
+                total_gradient_time += grad_time
+                # Checking gradient components
+                # for key in g:
+                #     if g[key]:
+                #         print(key)
+                #         print(g[key])
+                assert np.isfinite(f), f
+                if i > 1:
+                    prev = np.array([fz[-2] for fz in fs])
+                    curr = np.array([fz[-1] for fz in fs])
+                    diff = np.abs(prev-curr)/prev
+                    if diff.mean() < threshold:
+                        break
+                        br = True
 
-                if br:
-                    break
-                
+                fs[j].append(f)
+                gs[j].append(jnp.linalg.norm(ravel_pytree(g)[0]))
+                opt_state = opt_state1
+                local_opt_state[j] = local_opt_state1
+                rng = rng1
 
+            
+
+            if br:
+                break
+        
+        print(f"Average gradient calculation time is {total_gradient_time/(n_iter)} for {n_tips} tips and {n_epochs} epochs")
+        exit(0)      
+        
         p_star = get_params(opt_state)
         local_p_star = [get_params(lop) for lop in local_opt_state]
 

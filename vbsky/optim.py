@@ -70,7 +70,7 @@ def loss(
     elbo2 = 0.0
     if c1[1]:
         s2 = vmap(loglik, (0,) + (None,) * 8)(
-            unpack(samples), tree_data, tip_data, Q, c2, dbg, True, equidistant_intervals, _params_prior_loglik
+            unpack(samples), tree_data, tip_data, Q, c2, dbg, False, equidistant_intervals, _params_prior_loglik
         )
         elbo2 += jnp.mean(s2)
     if dbg:

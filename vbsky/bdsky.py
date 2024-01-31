@@ -291,6 +291,11 @@ def loglik(
 
     lam, psi, mu, rho = _bdsky_transform(params)
 
+    #id_print(lam, what="lam")
+    #id_print(psi, what="psi")
+    #id_print(mu, what="mu")
+    #id_print(rho, what="rho")
+
     # params["root_height"] = id_print(params["root_height"], what="root_height")
 
     # Convert proportions and root height to internal node heights.
@@ -302,6 +307,9 @@ def loglik(
         root_height,
         params["proportions"],
     )
+
+    # id_print(root_height, what="root_height")
+    # id_print(node_heights, what="node_heights")
 
     # Convert node heights to branch lengths
     branch_lengths = node_heights[tr_d.child_parent[:-1]] - node_heights[:-1]
